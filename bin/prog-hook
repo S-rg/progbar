@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Claude Code PreToolUse hook (matcher: Bash).
+
+Rewrites long-running Bash commands to run under `prog`, so their progress
+shows up in progd / the dashboard / ntfy. Short commands pass through untouched.
+
+Config (env or ~/.config/progbar/env):
+  PROG_WRAP=background|auto|all|off
+                              background (default): wrap only run_in_background calls
+                              auto: background runs + known long commands (regex below)
+  PROG_WRAP_EXTRA=<regex>     extra regex; matching commands are also wrapped
+  PROG_WRAP_SKIP=<regex>      commands matching this are never wrapped
+  PROG_BIN=<path>             path to prog (default: next to this hook, else `prog`)
+Never fails the tool call: any error -> exit 0 with no output (command runs as-is).
+"""
+import json, os, re, shlex, sys
+
+LONG = re.compile(r"""(?x)
+  \b(pip3?|uv|poetry|conda|mamba|pipx)\s+(install|sync|add|update|lock)\b
+| \b(npm|pnpm|yarn|bun)\s+(i|install|ci|add|run\s+build|build)\b
+| \b(cargo|go)\s+(build|install|test|run)\b
+| \b(make|cmake|ninja|bazel|gradle|gradlew|mvn)\b
+| \b(docker|podman)\s+(build|pull|push|compose\s+(up|build|pull))\b
+| \b(wget|aria2c|rsync|scp|rclone|ffmpeg|yt-dlp|huggingface-cli|hf)\b
+| \bcurl\b.*\s(-O|-o|--output|--remote-name)\b
+| \bgit\s+(clone|lfs|fetch|pull|push)\b
+| \b(apt|apt-get|dnf|brew|pacman)\s+(install|upgrade|update)\b
+| \b(pytest|tox|nox)\b
+| \b(python3?|uv\s+run|torchrun|accelerate\s+launch|deepspeed)\b.*\b(train|finetune|fine_tune|eval|benchmark|download|preprocess|sweep)\w*
+| \bsleep\s+\d{2,}
+""")
+
+
+def load_cfg():
+    cfg = {}
+    path = os.path.expanduser("~/.config/progbar/env")
+    try:
+        with open(path) as f:
+            for ln in f:
+                ln = ln.strip()
+                if ln and not ln.startswith("#") and "=" in ln:
+                    k, v = ln.split("=", 1)
+                    cfg[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    cfg.update({k: v for k, v in os.environ.items() if k.startswith("PROG")})
+    return cfg
+
+
+def main():
+    data = json.load(sys.stdin)
+    if data.get("tool_name") != "Bash":
+        return
+    ti = data.get("tool_input") or {}
+    cmd = ti.get("command")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return
+    cfg = load_cfg()
+    mode = cfg.get("PROG_WRAP", "background").lower()
+    if mode == "off":
+        return
+
+    here = os.path.dirname(os.path.realpath(__file__))
+    prog = cfg.get("PROG_BIN") or (os.path.join(here, "prog") if os.path.exists(os.path.join(here, "prog")) else "prog")
+
+    stripped = cmd.lstrip()
+    if stripped.startswith(("prog ", prog + " ", shlex.quote(prog) + " ")):
+        return  # already wrapped
+    if cfg.get("PROG_WRAP_SKIP") and re.search(cfg["PROG_WRAP_SKIP"], cmd):
+        return
+    # Interactive/pager-ish or cwd-changing-only commands: leave alone.
+    if re.match(r"^(cd|export|source|\.|alias|unset)\b[^;&|]*$", stripped):
+        return
+
+    wrap = mode == "all" or bool(ti.get("run_in_background"))
+    if not wrap and mode == "auto":
+        wrap = bool(LONG.search(cmd)) or bool(cfg.get("PROG_WRAP_EXTRA") and re.search(cfg["PROG_WRAP_EXTRA"], cmd))
+    if not wrap:
+        return
+
+    name = (ti.get("description") or "").strip() or None
+    parts = [shlex.quote(prog), "--source", "claude"]
+    if name:
+        parts += ["--name", shlex.quote(name[:120])]
+    parts += ["-c", shlex.quote(cmd)]
+    new_input = dict(ti)
+    new_input["command"] = " ".join(parts)
+    json.dump({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": new_input}}, sys.stdout)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)

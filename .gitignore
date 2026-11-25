@@ -1,0 +1,15 @@
+# build output
+progd/progd
+progd/progd-*
+dist/
+
+# python
+__pycache__/
+*.pyc
+
+# local tool / editor state
+.claude/
+.mcp.json
+.idea/
+.vscode/
+.DS_Store

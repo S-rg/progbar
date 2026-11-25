@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f1115">
+<title>Progress</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#14171c;--mut:#6b7280;--line:#e5e7eb;--bar:#e5e7eb;
+--run:#2563eb;--ok:#16a34a;--bad:#dc2626;--warn:#d97706}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--fg:#e8eaee;--mut:#8b93a1;
+--line:#262b35;--bar:#262b35;--run:#60a5fa;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+padding:max(12px,env(safe-area-inset-top)) 16px 40px}
+header{display:flex;align-items:center;gap:10px;margin:4px 0 14px}
+h1{font-size:20px;margin:0;flex:1}
+button{font:inherit;font-size:13px;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+.host{margin:18px 0 8px;display:flex;align-items:center;gap:8px;font-weight:600}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+.dot.up{background:var(--ok)}.dot.down{background:var(--bad)}
+.host small{font-weight:400;color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:8px 0}
+.top{display:flex;gap:8px;align-items:baseline}
+.name{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pct{font-variant-numeric:tabular-nums;font-weight:600}
+.bar{height:8px;background:var(--bar);border-radius:99px;overflow:hidden;margin:8px 0 6px}
+.fill{height:100%;background:var(--run);border-radius:99px;transition:width .4s}
+.indet .fill{width:30%!important;animation:slide 1.4s infinite ease-in-out}
+@keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
+.done .fill{background:var(--ok)}.failed .fill{background:var(--bad)}.lost .fill{background:var(--warn)}
+.meta{color:var(--mut);font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 12px;font-variant-numeric:tabular-nums}
+.line{color:var(--mut);font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:6px;
+white-space:pre-wrap;word-break:break-all;max-height:3.9em;overflow:hidden}
+.badge{font-size:11px;padding:1px 6px;border-radius:99px;border:1px solid var(--line);color:var(--mut)}
+.empty{color:var(--mut);font-size:13px;padding:4px 2px}
+details{margin-top:24px;color:var(--mut);font-size:13px}
+input{font:inherit;width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);margin:6px 0}
+</style>
+</head>
+<body>
+<header><h1>Progress</h1><button id="hideDone">Hide finished</button></header>
+<main id="hosts"></main>
+<details>
+  <summary>Devices</summary>
+  <p>Built-in peers come from <code>PROGD_PEERS</code> on the server. Extra peers (one per line, e.g. <code>http://laptop-b:7777</code>) are saved in this browser only.</p>
+  <textarea id="extra" rows="3" style="width:100%"></textarea>
+  <button id="save">Save</button>
+</details>
+<script>
+const $ = s => document.querySelector(s);
+const state = {};            // base -> {host, runs, up, now, skew}
+const sources = {};
+let hideDone = false;
+try { hideDone = localStorage.getItem('hideDone') === '1'; } catch {}
+$('#hideDone').textContent = hideDone ? 'Show finished' : 'Hide finished';
+
+function extraPeers(){ try { return (localStorage.getItem('peers')||'').split(/\s+/).filter(Boolean); } catch { return []; } }
+
+async function init(){
+  let peers = [];
+  try { const r = await fetch('/api/peers'); peers = (await r.json()).peers || []; } catch {}
+  const all = [location.origin, ...peers, ...extraPeers()].map(u => u.replace(/\/$/,''));
+  [...new Set(all)].forEach(connect);
+  $('#extra').value = extraPeers().join('\n');
+}
+
+function connect(base){
+  if (sources[base]) return;
+  state[base] = state[base] || {host: base.replace(/^https?:\/\//,''), runs: [], up: null};
+  const es = new EventSource(base + '/api/events');
+  sources[base] = es;
+  es.onmessage = e => {
+    const d = JSON.parse(e.data);
+    state[base] = {host: d.host, runs: d.runs || [], up: true, skew: Date.now() - d.now};
+    render();
+  };
+  es.onerror = () => { state[base].up = false; render(); };   // EventSource auto-reconnects
+}
+
+const fmtDur = ms => { let s = Math.max(0, Math.round(ms/1000)); const h = Math.floor(s/3600); s%=3600;
+  const m = Math.floor(s/60); s%=60; return h ? `${h}h${String(m).padStart(2,'0')}m` : m ? `${m}m${String(s).padStart(2,'0')}s` : `${s}s`; };
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function card(r, skew){
+  const t = Date.now() - (skew||0);
+  const known = r.pct !== null && r.pct !== undefined;
+  const pct = r.state === 'done' ? 100 : known ? Math.min(100, r.pct) : 0;
+  const cls = r.state === 'running' && !known ? 'indet' : r.state;
+  const label = r.state === 'running' ? (known ? pct.toFixed(pct < 10 ? 1 : 0) + '%' : '…')
+              : r.state === 'done' ? 'done' : r.state === 'failed' ? `exit ${r.exit ?? '?'}` : 'lost';
+  const meta = [];
+  if (r.cur && r.total) meta.push(`${esc(r.cur)}/${esc(r.total)}`);
+  if (r.rate) meta.push(esc(r.rate));
+  if (r.eta && r.state === 'running') meta.push('ETA ' + esc(r.eta));
+  meta.push(fmtDur((r.end || t) - r.start));
+  if (r.source) meta.push(`<span class="badge">${esc(r.source)}</span>`);
+  return `<div class="card ${cls}">
+    <div class="top"><div class="name" title="${esc(r.cmd)}">${esc(r.name || r.cmd)}</div><div class="pct">${label}</div></div>
+    <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
+    <div class="meta">${meta.join('')}</div>
+    ${r.line ? `<div class="line">${esc(r.line)}</div>` : ''}
+  </div>`.replace(/<\/span><span/g,'</span> <span');
+}
+
+function render(){
+  const html = Object.entries(state).map(([base, h]) => {
+    const runs = h.runs.filter(r => !hideDone || r.state === 'running');
+    const active = h.runs.filter(r => r.state === 'running').length;
+    return `<div class="host"><span class="dot ${h.up ? 'up' : h.up === false ? 'down' : ''}"></span>${esc(h.host)}
+      <small>${h.up === false ? 'unreachable' : `${active} running`}</small></div>` +
+      (runs.length ? runs.map(r => card(r, h.skew)).join('') : `<div class="empty">No ${hideDone ? 'active ' : ''}runs</div>`);
+  }).join('');
+  $('#hosts').innerHTML = html;
+  const n = Object.values(state).reduce((a, h) => a + h.runs.filter(r => r.state === 'running').length, 0);
+  document.title = n ? `(${n}) Progress` : 'Progress';
+}
+
+$('#hideDone').onclick = () => { hideDone = !hideDone; try { localStorage.setItem('hideDone', hideDone ? '1' : '0'); } catch {}
+  $('#hideDone').textContent = hideDone ? 'Show finished' : 'Hide finished'; render(); };
+$('#save').onclick = () => { try { localStorage.setItem('peers', $('#extra').value.trim()); } catch {} location.reload(); };
+setInterval(render, 1000);   // keep elapsed timers ticking
+init();
+</script>
+</body>
+</html>
