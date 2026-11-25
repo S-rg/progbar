@@ -4,17 +4,26 @@
 #   widget/generate.sh                              # this machine + PROGD_PEERS from ~/.config/progbar/env
 #   widget/generate.sh http://a:7777 http://b:7777  # explicit hosts (spaces or commas)
 #   widget/generate.sh -o ~/progbar-widget.js ...   # custom output path
+#   widget/generate.sh --primary http://box:7777    # try this host first (tap target), then the rest
 #
+# The widget fetches every host; tapping it opens the first one that responded, in this order.
 # Default output: widget/progbar-widget.js (gitignored). Paste it into Scriptable on your iPhone.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="$DIR/progbar-widget.js"
-if [ "${1:-}" = "-o" ]; then OUT="$2"; shift 2; fi
+PRIMARY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) OUT="$2"; shift 2;;
+    --primary) PRIMARY="$2"; shift 2;;
+    *) break;;
+  esac
+done
 
-python3 - "$DIR/progbar-widget.template.js" "$OUT" "$@" <<'PY'
+python3 - "$DIR/progbar-widget.template.js" "$OUT" "$PRIMARY" "$@" <<'PY'
 import json, os, re, sys
 
-template, out, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+template, out, primary, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
 hosts = [h for a in args for h in a.split(",") if h.strip()]
 
 if not hosts:
@@ -28,6 +37,8 @@ if not hosts:
     except OSError:
         sys.exit("no hosts given and ~/.config/progbar/env not found; pass hosts, e.g. http://laptop:7777")
     hosts = [conf.get("PROGD_PUBLIC_URL", "")] + conf.get("PROGD_PEERS", "").split(",")
+if primary:
+    hosts = [primary] + hosts
 
 seen, clean = set(), []
 for h in hosts:

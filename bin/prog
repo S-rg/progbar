@@ -3,6 +3,10 @@
 
     prog [--name NAME] [--source SRC] -- cmd args...
     prog [--name NAME] [--source SRC] -c 'shell command string'
+    prog --tail logs/run.log -c 'python job.py > logs/run.log 2>&1'
+
+--tail FILE follows FILE for progress too (read from the start, for `>` redirects);
+--tail-end FILE only reads what's appended after prog starts (for `>>` redirects).
 
 The command thinks it has a real terminal, so tqdm / pip / rsync / curl / cargo
 draw their bars. prog parses those bars and POSTs the latest state to progd
@@ -11,7 +15,7 @@ heartbeat. Output is passed through with carriage-return spam collapsed and
 ANSI escapes stripped, so whoever reads stdout (e.g. Claude) gets clean text.
 Exit status is the command's exit status. If progd is down, nothing breaks.
 """
-import codecs, errno, fcntl, json, os, pty, re, shlex, signal, socket
+import codecs, errno, fcntl, json, os, pty, re, select, shlex, signal, socket
 import struct, subprocess, sys, termios, threading, time, urllib.request
 
 def _conf():
@@ -41,6 +45,10 @@ ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x
 TQDM = re.compile(r"(\d{1,3})%\|[^|]*\|\s*([\d.]+\s?[kMGTP]?i?B?)/([\d.]+\s?[kMGTP]?i?B?)\s*\[([\d:]+)<([\d:?]+)(?:,\s*([^\]]+))?\]")
 PCT = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d+)?)\s?%")
 FRAC = re.compile(r"(?i)(?:\b(?:step|epoch|batch|iter(?:ation)?|it|file|item|chunk|shard|page|request|test|task|job)s?\b\s*[:#]?\s*|\]\s*|\[\s*|\()(\d+)\s*/\s*(\d+)\b")
+# Any "label: N/M" or "label N/M" (e.g. "competitions: 250/6889", "matches 12/300").
+# The separator after the label is required (so paths like x/12/34 don't match),
+# and the second number must not continue into a date or path (2024/01/05, 1/2/3).
+GENERIC_FRAC = re.compile(r"\b[A-Za-z][\w\-]*(?::\s*|\s+)(\d+)\s*/\s*(\d+)(?![\d/.\-:])")
 RATE = re.compile(r"(\d+(?:\.\d+)?\s?(?:[kKMGT]i?)?(?:B|b|it|items?|files?|samples?|tok(?:ens)?)/s)")
 ETA = re.compile(r"(?i)\beta[:\s]+([\d:hms ]+?)(?=\s|$|,)|<([\d:]+),")
 
@@ -57,12 +65,14 @@ def parse(frame):
     pcts = [float(p) for p in PCT.findall(frame) if 0 <= float(p) <= 100]
     if pcts:
         out["pct"] = pcts[-1]
-    fr = FRAC.findall(frame)
-    if fr:
-        cur, tot = int(fr[-1][0]), int(fr[-1][1])
-        if 0 < tot and cur <= tot:
+    for rx in (FRAC, GENERIC_FRAC):
+        fr = [(int(a), int(b)) for a, b in rx.findall(frame)]
+        fr = [(a, b) for a, b in fr if 0 < b and a <= b]
+        if fr:
+            cur, tot = fr[-1]
             out["cur"], out["total"] = str(cur), str(tot)
             out.setdefault("pct", round(100.0 * cur / tot, 1))
+            break
     if not out:
         return None
     r = RATE.search(frame)
@@ -72,6 +82,54 @@ def parse(frame):
     if e:
         out["eta"] = (e.group(1) or e.group(2) or "").strip()
     return out
+
+
+def follow(path, from_end, on_frame, stop, poll=0.5, max_chunk=65536):
+    """Parse progress from a log file the command writes to (e.g. `> run.log`).
+
+    Waits for the file to appear, handles truncation (the shell's `>` truncates it
+    just after prog starts), and only looks at the newest max_chunk bytes per poll,
+    so huge logs stay cheap.
+    """
+    pos = None
+    partial = ""
+
+    def drain(final=False):
+        nonlocal pos, partial
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return
+        if pos is None:
+            pos = size if from_end else 0
+        if size < pos:  # truncated / rotated
+            pos, partial = 0, ""
+        if size == pos:
+            if final and partial.strip():
+                on_frame(partial)
+            return
+        start = max(pos, size - max_chunk)
+        if start > pos:
+            partial = ""  # skipped ahead; drop the broken line
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                data = f.read(size - start)
+        except OSError:
+            return
+        pos = start + len(data)
+        text = partial + ANSI.sub("", data.decode("utf-8", "replace"))
+        frames = re.split(r"[\r\n]", text)
+        partial = "" if final else frames.pop()
+        # only the latest few frames matter for "current progress"
+        for fr in [f for f in frames if f.strip()][-20:]:
+            on_frame(fr)
+        if final and partial.strip():
+            on_frame(partial)
+
+    while not stop.wait(poll):
+        drain()
+    drain(final=True)
 
 
 class Reporter:
@@ -126,10 +184,14 @@ def main():
     name = os.environ.get("PROG_NAME")
     source = os.environ.get("PROG_SOURCE", "claude" if os.environ.get("CLAUDECODE") else "shell")
     shell_cmd = None
+    tails = []  # (path, from_end)
     while argv:
         a = argv[0]
         if a == "--name" and len(argv) > 1:
             name, argv = argv[1], argv[2:]
+        elif a in ("--tail", "--tail-end") and len(argv) > 1:
+            tails.append((argv[1], a == "--tail-end"))
+            argv = argv[2:]
         elif a == "--source" and len(argv) > 1:
             source, argv = argv[1], argv[2:]
         elif a == "-c" and len(argv) > 1:
@@ -185,7 +247,10 @@ def main():
         print(f"prog: {cmd[0]}: {e.strerror}", file=sys.stderr)
         rep.finish(127)
         return 127
-    os.close(slave)
+    # Keep our copy of the slave open. If the command sends all its output to a file
+    # (`> run.log 2>&1`), nothing else holds the pty; closing it would make reads hit
+    # EIO at once and the pty hangup would SIGHUP the still-running command.
+    # So we stop on process exit instead of on EIO.
 
     def forward(sig, _frame):
         try:
@@ -207,6 +272,14 @@ def main():
             return
         p = parse(frame)
         rep.update(**(p or {}), line=frame[:300])
+
+    tail_stop = threading.Event()
+    tail_threads = []
+    for path, from_end in tails:
+        path = os.path.abspath(os.path.expandvars(os.path.expanduser(path)))
+        t = threading.Thread(target=follow, args=(path, from_end, on_frame, tail_stop), daemon=True)
+        t.start()
+        tail_threads.append(t)
 
     def feed(text):
         nonlocal cur, last
@@ -232,13 +305,24 @@ def main():
             out.write(("\n".join(emit) + "\n").encode())
             out.flush()
 
+    exited_at = None
     while True:
+        try:
+            ready, _, _ = select.select([master], [], [], 0.25)
+        except InterruptedError:
+            continue
+        if not ready:
+            if exited_at is None and proc.poll() is not None:
+                exited_at = time.time()
+            if exited_at is not None:
+                break  # child gone and output drained
+            continue
         try:
             chunk = os.read(master, 65536)
         except OSError as e:
             if e.errno == errno.EINTR:
                 continue
-            break  # EIO: child closed the pty
+            break
         if not chunk:
             break
         text = pending + dec.decode(chunk)
@@ -246,6 +330,12 @@ def main():
         if text.endswith("\r"):
             text, pending = text[:-1], "\r"
         feed(ANSI.sub("", text.replace("\r\n", "\n")))
+        # a background grandchild may keep writing forever; stop 1s after the child exits
+        if exited_at is None and proc.poll() is not None:
+            exited_at = time.time()
+        if exited_at is not None and time.time() - exited_at > 1.0:
+            break
+    os.close(slave)
     os.close(master)
     feed(ANSI.sub("", (pending + dec.decode(b"", final=True)).replace("\r\n", "\n")))
     final = cur if cur.strip() else last
@@ -254,6 +344,9 @@ def main():
         out.flush()
 
     code = proc.wait()
+    tail_stop.set()
+    for t in tail_threads:
+        t.join(timeout=2)
     if code < 0:
         code = 128 - code
     rep.finish(code)

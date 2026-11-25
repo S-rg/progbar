@@ -92,7 +92,12 @@ rewritten it. Every wrapped call then has to be sent twice. Only wrapping backgr
   ```bash
   widget/generate.sh                                  # hosts from ~/.config/progbar/env
   widget/generate.sh http://laptop-a:7777 http://laptop-b:7777
+  widget/generate.sh --primary http://laptop-b:7777   # put one host first
   ```
+
+  The widget shows only active runs, each with an estimated time left that counts down. It fetches
+  every host; tapping it opens the dashboard of the first host in the list that responded, so
+  `--primary` sets your default, and the others are fallbacks.
 
   Install [Scriptable](https://scriptable.app), paste the generated file into a new script, and add a
   Scriptable widget (small, medium, large, or lock-screen). iOS refreshes widgets only every few minutes,
@@ -132,9 +137,24 @@ rewritten it. Every wrapped call then has to be sent twice. Only wrapping backgr
 
 ## What `prog` recognises
 
-The tqdm format (`45%|███ | 450/1000 [00:12<00:15, 36it/s]`), any `NN%`, `step/epoch/batch/file N/M`,
-`[N/M]`, rates like `12.3MB/s` / `36it/s`, and `ETA 1:23`. Runs with no recognisable progress still show a
-pulsing bar, the elapsed time and the last output line.
+- the tqdm format: `45%|███ | 450/1000 [00:12<00:15, 36it/s]`
+- any `NN%`
+- `N/M` after a label: `epoch 3/10`, `competitions: 250/6889`, `matches 12 / 300`, `[N/M]`. Dates and paths
+  like `2024/01/05` are ignored, and so is anything where N > M.
+- rates like `12.3MB/s` / `36it/s`, and `ETA 1:23`
+
+Runs with no recognisable progress still show a pulsing bar, the elapsed time and the last output line.
+
+**Output redirected to a log file:** if a command sends its output to a file (`> logs/run.log 2>&1`),
+none of it reaches the terminal. The hook spots `>`, `>>` and `&>` redirects (adjusting for a leading
+`cd dir &&`) and runs `prog --tail <file>`, which follows the log for progress while the file is
+still written as normal. To do this by hand:
+
+```bash
+prog --tail logs/run.log -c 'python job.py > logs/run.log 2>&1'
+```
+
+Use `--tail-end` for `>>` (append) logs, so earlier runs' lines are ignored.
 
 ## Caveats
 

@@ -3,6 +3,8 @@
 
 Rewrites long-running Bash commands to run under `prog`, so their progress
 shows up in progd / the dashboard / ntfy. Short commands pass through untouched.
+If the command redirects its output to a file (`> run.log 2>&1`), prog is told
+to follow that file too, since the progress output never reaches the terminal.
 
 Config (env or ~/.config/progbar/env):
   PROG_WRAP=background|auto|all|off
@@ -29,6 +31,42 @@ LONG = re.compile(r"""(?x)
 | \b(python3?|uv\s+run|torchrun|accelerate\s+launch|deepspeed)\b.*\b(train|finetune|fine_tune|eval|benchmark|download|preprocess|sweep)\w*
 | \bsleep\s+\d{2,}
 """)
+
+
+# stdout redirects: `> f`, `>> f`, `1> f`, `&> f`, `&>> f`  (not `2> f`, `>&2`, `2>&1`)
+REDIRECT = re.compile(r"""(?:^|[^\d&>|])(&>>?|1?>>?)(?!&)\s*("[^"]+"|'[^']+'|[^\s;&|<>()]+)""")
+LEADING_CD = re.compile(r"""^\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)\s*&&""")
+
+
+def find_log_files(cmd):
+    """Files the command sends its output to, so prog can follow them for progress.
+
+    Returns [(path, append)]. Relative paths are adjusted for a leading `cd DIR &&`,
+    since prog resolves them from Claude's cwd.
+    """
+    base = ""
+    rest = cmd
+    while True:
+        m = LEADING_CD.match(rest)
+        if not m:
+            break
+        d = shlex.split(m.group(1))[0]
+        base = d if os.path.isabs(os.path.expanduser(d)) else os.path.join(base, d)
+        rest = rest[m.end():]
+    out = []
+    for op, target in REDIRECT.findall(cmd):
+        try:
+            path = shlex.split(target)[0]
+        except ValueError:
+            continue
+        if not path or path.startswith("/dev/") or path.startswith("&"):
+            continue
+        if base and not os.path.isabs(os.path.expanduser(path)) and not path.startswith("$"):
+            path = os.path.join(base, path)
+        item = (path, op.endswith(">>"))
+        if item not in out:
+            out.append(item)
+    return out[:4]
 
 
 def load_cfg():
@@ -82,6 +120,8 @@ def main():
     parts = [shlex.quote(prog), "--source", "claude"]
     if name:
         parts += ["--name", shlex.quote(name[:120])]
+    for path, append in find_log_files(cmd):
+        parts += ["--tail-end" if append else "--tail", shlex.quote(path)]
     parts += ["-c", shlex.quote(cmd)]
     new_input = dict(ti)
     new_input["command"] = " ".join(parts)

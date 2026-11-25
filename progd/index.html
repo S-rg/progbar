@@ -83,6 +83,20 @@ function connect(base){
 const fmtDur = ms => { let s = Math.max(0, Math.round(ms/1000)); const h = Math.floor(s/3600); s%=3600;
   const m = Math.floor(s/60); s%=60; return h ? `${h}h${String(m).padStart(2,'0')}m` : m ? `${m}m${String(s).padStart(2,'0')}s` : `${s}s`; };
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtClock = secs => { const s = Math.max(0, Math.round(secs)); const h = Math.floor(s/3600);
+  const m = Math.floor((s%3600)/60), x = s%60, p = n => String(n).padStart(2,'0');
+  return h ? `${h}:${p(m)}:${p(x)}` : `${m}:${p(x)}`; };
+
+// Seconds left as of the run's last update: its own ETA if it printed one (tqdm "01:23"),
+// else simple extrapolation: elapsed × (100 − pct) / pct. Same rule as the iPhone widget.
+function secondsLeft(r){
+  if (r.state !== 'running') return null;
+  const eta = (r.eta || '').trim();
+  if (/^\d+(:\d{1,2}){1,2}$/.test(eta)) return eta.split(':').reduce((a, x) => a*60 + Number(x), 0);
+  const elapsed = (r.updated - r.start) / 1000;
+  if (r.pct == null || r.pct < 0.5 || r.pct >= 100 || elapsed < 10) return null;  // too early to guess
+  return elapsed * (100 - r.pct) / r.pct;
+}
 
 function card(r, skew){
   const t = Date.now() - (skew||0);
@@ -94,15 +108,19 @@ function card(r, skew){
   const meta = [];
   if (r.cur && r.total) meta.push(`${esc(r.cur)}/${esc(r.total)}`);
   if (r.rate) meta.push(esc(r.rate));
-  if (r.eta && r.state === 'running') meta.push('ETA ' + esc(r.eta));
   meta.push(fmtDur((r.end || t) - r.start));
+  const left = secondsLeft(r);
+  if (left != null) {
+    const leftNow = left - (t - r.updated) / 1000;   // counts down every render (1 s)
+    meta.push(leftNow > 0 ? `~${fmtClock(leftNow)} left` : 'any moment');
+  }
   if (r.source) meta.push(`<span class="badge">${esc(r.source)}</span>`);
   return `<div class="card ${cls}">
     <div class="top"><div class="name" title="${esc(r.cmd)}">${esc(r.name || r.cmd)}</div><div class="pct">${label}</div></div>
     <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
-    <div class="meta">${meta.join('')}</div>
+    <div class="meta">${meta.map(m => `<span>${m}</span>`).join('')}</div>
     ${r.line ? `<div class="line">${esc(r.line)}</div>` : ''}
-  </div>`.replace(/<\/span><span/g,'</span> <span');
+  </div>`;
 }
 
 function render(){

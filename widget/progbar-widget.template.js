@@ -19,16 +19,16 @@ const MAX_ROWS = { small: 2, medium: 3, large: 8, accessoryRectangular: 1 };
 const hosts = (args.widgetParameter ? args.widgetParameter.split(",") : HOSTS)
   .map(h => h.trim().replace(/\/$/, "")).filter(Boolean);
 const family = config.widgetFamily || "medium";
-const dark = Device.isUsingDarkAppearance();
+// Always dark, regardless of the phone's appearance setting.
 const C = {
-  bg: dark ? new Color("#171a21") : new Color("#ffffff"),
-  fg: dark ? new Color("#e8eaee") : new Color("#14171c"),
-  mut: dark ? new Color("#8b93a1") : new Color("#6b7280"),
-  track: dark ? new Color("#2a2f3a") : new Color("#e5e7eb"),
-  running: dark ? new Color("#60a5fa") : new Color("#2563eb"),
-  done: dark ? new Color("#4ade80") : new Color("#16a34a"),
-  failed: dark ? new Color("#f87171") : new Color("#dc2626"),
-  lost: dark ? new Color("#fbbf24") : new Color("#d97706"),
+  bg: new Color("#111318"),
+  fg: new Color("#e8eaee"),
+  mut: new Color("#8b93a1"),
+  track: new Color("#2a2f3a"),
+  running: new Color("#60a5fa"),
+  done: new Color("#4ade80"),
+  failed: new Color("#f87171"),
+  lost: new Color("#fbbf24"),
 };
 
 async function fetchHost(base) {
@@ -61,15 +61,52 @@ function bar(pct, color, w, h) {
 const dur = ms => { let s = Math.max(0, Math.round(ms / 1000)); const h = Math.floor(s / 3600); s %= 3600;
   const m = Math.floor(s / 60); s %= 60; return h ? `${h}h${m}m` : m ? `${m}m${s}s` : `${s}s`; };
 
+const fmtClock = secs => { const s = Math.max(0, Math.round(secs)); const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60), x = s % 60, p = n => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(x)}` : `${m}:${p(x)}`; };
+
+// Seconds left as of the run's last update: the run's own ETA if it printed one
+// (tqdm "01:23" / "1:02:03"), else simple extrapolation: elapsed × (100 − pct) / pct.
+function secondsLeft(r) {
+  if (r.state !== "running") return null;
+  const eta = (r.eta || "").trim();
+  if (/^\d+(:\d{1,2}){1,2}$/.test(eta)) return eta.split(":").reduce((a, x) => a * 60 + Number(x), 0);
+  const pct = r.pct;
+  const elapsed = (r.updated - r.start) / 1000;
+  if (pct == null || pct < 0.5 || pct >= 100 || elapsed < 10) return null; // too early to guess
+  return elapsed * (100 - pct) / pct;
+}
+
+// A live timer that iOS ticks between refreshes (counts down to a future date, up from a
+// past one). iOS gives a date text all the free width in its row, which pushed whatever
+// came after it far to the right, so each timer sits in a box sized to its digits.
+function addTimer(stack, date, sampleSecs, size, color) {
+  const box = stack.addStack();
+  box.size = new Size(Math.ceil(fmtClock(sampleSecs).length * size * 0.62) + 2, 0);
+  const d = box.addDate(date);
+  d.applyTimerStyle();
+  d.leftAlignText();
+  d.font = Font.regularMonospacedSystemFont(size);
+  d.textColor = color; d.lineLimit = 1; d.minimumScaleFactor = 0.6;
+  return d;
+}
+
+function addMuted(stack, text, size) {
+  const t = stack.addText(text);
+  t.font = Font.systemFont(size); t.textColor = C.mut; t.lineLimit = 1;
+  return t;
+}
+
 const results = await Promise.all(hosts.map(fetchHost));
-// Running runs first (any host), then most recent finished.
+// Only active runs: done, failed (exited) and lost runs are hidden. Newest first.
 const rows = results.flatMap(h => h.runs.map(r => ({ ...r, hostLabel: h.host, skew: h.skew })))
-  .sort((a, b) => (b.state === "running") - (a.state === "running") || b.start - a.start);
+  .filter(r => r.state === "running")
+  .sort((a, b) => b.start - a.start);
 const running = rows.filter(r => r.state === "running").length;
 
 const w = new ListWidget();
 w.backgroundColor = C.bg;
-w.setPadding(12, 14, 12, 14);
+w.setPadding(14, 14, 12, 14);
 w.url = results.find(h => h.up)?.base || hosts[0];
 w.refreshAfterDate = new Date(Date.now() + (running ? 60 : 600) * 1000);
 
@@ -79,7 +116,7 @@ if (!hosts.length) {
 } else if (family === "accessoryRectangular") {
   // Lock screen widget
   const r = rows[0];
-  const t = w.addText(r ? `${r.state === "running" && r.pct != null ? Math.round(r.pct) + "% " : ""}${r.name || r.cmd}` : "No runs");
+  const t = w.addText(r ? `${r.state === "running" && r.pct != null ? Math.round(r.pct) + "% " : ""}${r.name || r.cmd}` : "No active runs");
   t.font = Font.semiboldSystemFont(13); t.lineLimit = 2;
   const s = w.addText(`${running} running`); s.font = Font.systemFont(11);
 } else {
@@ -91,12 +128,13 @@ if (!hosts.length) {
   const down = results.filter(h => !h.up).length;
   const hs = head.addText(down ? `${down}/${results.length} offline` : `${results.length} devices`);
   hs.font = Font.systemFont(11); hs.textColor = down ? C.failed : C.mut;
-  w.addSpacer(8);
+  w.addSpacer(10);
 
-  const barW = family === "small" ? 130 : 300;
+  // Bars must fit inside the widget minus padding, or iOS shrinks/shifts the whole layout.
+  const barW = family === "small" ? 118 : 290;
   const show = rows.slice(0, MAX_ROWS[family] || 3);
   if (!show.length) {
-    const e = w.addText("No runs"); e.font = Font.systemFont(12); e.textColor = C.mut;
+    const e = w.addText("No active runs"); e.font = Font.systemFont(12); e.textColor = C.mut;
   }
   for (const r of show) {
     const now = Date.now() - (r.skew || 0);
@@ -114,15 +152,34 @@ if (!hosts.length) {
     img.imageSize = new Size(barW, 6);
     w.addSpacer(2);
     const meta = [r.hostLabel];
-    if (family !== "small") {
-      if (r.cur && r.total) meta.push(`${r.cur}/${r.total}`);
-      if (r.eta && r.state === "running") meta.push(`ETA ${r.eta}`);
+    if (family !== "small" && r.cur && r.total) meta.push(`${r.cur}/${r.total}`);
+    const row = w.addStack(); row.centerAlignContent();
+    const left = secondsLeft(r);
+    // r.updated is server time; skew = phone clock − server clock
+    const end = left == null ? null : new Date(r.updated + (r.skew || 0) + left * 1000);
+    const leftNow = end ? (end - Date.now()) / 1000 : -1;
+    if (leftNow > 0) {
+      addMuted(row, meta.join(" · ") + " · ~", 10);
+      addTimer(row, end, leftNow, 10, C.mut);
+      addMuted(row, " left", 10);
+    } else {
+      meta.push(dur((r.end || now) - r.start)); // no estimate yet (or it's overdue): show elapsed
+      addMuted(row, meta.join(" · "), 10);
     }
-    meta.push(dur((r.end || now) - r.start));
-    const m = w.addText(meta.join(" · ")); m.font = Font.systemFont(10); m.textColor = C.mut; m.lineLimit = 1;
+    row.addSpacer();
     w.addSpacer(6);
   }
   w.addSpacer();
+  // "Refreshed 14:32 · 3:12 ago": the clock time is when this snapshot was taken; iOS ticks
+  // the timer on its own between refreshes. (Scriptable widgets can't have a refresh button.)
+  const now = new Date();
+  const foot = w.addStack();
+  foot.centerAlignContent();
+  const df = new DateFormatter(); df.useNoDateStyle(); df.useShortTimeStyle();
+  addMuted(foot, `Refreshed ${df.string(now)} · `, 9);
+  addTimer(foot, now, 59 * 60 + 59, 9, C.mut); // sized for "59:59"; shrinks to fit past an hour
+  addMuted(foot, " ago", 9);
+  foot.addSpacer();
 }
 
 if (config.runsInWidget) Script.setWidget(w);
