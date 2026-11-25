@@ -2,6 +2,8 @@
 progd/progd
 progd/progd-*
 dist/
+# generated from widget/progbar-widget.template.js (contains your hostnames)
+widget/progbar-widget.js
 
 # python
 __pycache__/

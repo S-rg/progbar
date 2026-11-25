@@ -1,6 +1,11 @@
 // progbar iPhone widget for the Scriptable app (https://scriptable.app).
 //
-// Setup: paste this into a new Scriptable script, edit HOSTS below, add a Scriptable
+// TEMPLATE: don't paste this file directly. Generate the real widget with your hosts:
+//   widget/generate.sh                       # hosts from ~/.config/progbar/env
+//   widget/generate.sh http://a:7777 http://b:7777
+// That writes widget/progbar-widget.js. install.sh also runs it for you.
+//
+// Setup: paste the generated script into a new Scriptable script, add a Scriptable
 // widget to your home screen, long-press -> Edit Widget -> Script: this one.
 // Optional "Parameter": comma-separated hosts, overrides HOSTS for that widget.
 // Tap the widget to open the full live dashboard.
@@ -8,10 +13,7 @@
 // Needs the Tailscale VPN on. iOS decides how often widgets refresh (often every 5-15 min),
 // so this is a glance view; the dashboard page is live, and ntfy pushes are instant.
 
-const HOSTS = [
-  "http://laptop-a:7777",
-  "http://laptop-b:7777",
-];
+const HOSTS = [/*PROGBAR_HOSTS*/];
 const MAX_ROWS = { small: 2, medium: 3, large: 8, accessoryRectangular: 1 };
 
 const hosts = (args.widgetParameter ? args.widgetParameter.split(",") : HOSTS)
@@ -71,7 +73,10 @@ w.setPadding(12, 14, 12, 14);
 w.url = results.find(h => h.up)?.base || hosts[0];
 w.refreshAfterDate = new Date(Date.now() + (running ? 60 : 600) * 1000);
 
-if (family === "accessoryRectangular") {
+if (!hosts.length) {
+  const t = w.addText("No hosts set. Generate this script with widget/generate.sh, or put hosts in the widget Parameter.");
+  t.font = Font.systemFont(12); t.textColor = C.mut;
+} else if (family === "accessoryRectangular") {
   // Lock screen widget
   const r = rows[0];
   const t = w.addText(r ? `${r.state === "running" && r.pct != null ? Math.round(r.pct) + "% " : ""}${r.name || r.cmd}` : "No runs");

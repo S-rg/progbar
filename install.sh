@@ -93,6 +93,9 @@ fi
 [ -n "$PEERS" ] && setkv PROGD_PEERS "$PEERS"
 chmod 600 "$ENVF"
 
+echo "==> generating iPhone widget"
+widget/generate.sh || echo "   (skipped: run widget/generate.sh http://host:7777 ... yourself)"
+
 if [ "$SERVICE" = 1 ]; then
   case "$(uname -s)" in
     Linux)
@@ -168,4 +171,5 @@ echo
 echo "Done."
 echo "  Dashboard (this device): http://${TS_NAME:-localhost}:$PORT"
 echo "  Config:                  $ENVF   (restart: systemctl --user restart progd)"
+echo "  iPhone widget:           $(pwd)/widget/progbar-widget.js   (paste into Scriptable)"
 echo "  Try it:                  prog -- python3 -c 'import time,sys;[ (sys.stdout.write(f\"\\r{i}%\"),sys.stdout.flush(),time.sleep(.1)) for i in range(101)]'"

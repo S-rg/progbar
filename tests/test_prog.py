@@ -94,5 +94,37 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(r.stdout, "100%\nbye\n")
 
 
+class WidgetTests(unittest.TestCase):
+    GEN = os.path.join(ROOT, "widget", "generate.sh")
+
+    def gen(self, *args, home=None):
+        out = os.path.join(tempfile.mkdtemp(), "w.js")
+        env = dict(os.environ, HOME=home or tempfile.mkdtemp())
+        r = subprocess.run(["bash", self.GEN, "-o", out, *args], env=env, capture_output=True, text=True)
+        return r, (open(out).read() if os.path.exists(out) else None)
+
+    def test_explicit_hosts(self):
+        r, js = self.gen("http://a:7777,b:7777", "http://a:7777/")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('const HOSTS = [\n  "http://a:7777",\n  "http://b:7777",\n];', js)
+        self.assertNotIn("PROGBAR_HOSTS", js)
+        self.assertNotIn("TEMPLATE:", js)
+
+    def test_hosts_from_env_file(self):
+        home = tempfile.mkdtemp()
+        os.makedirs(os.path.join(home, ".config", "progbar"))
+        with open(os.path.join(home, ".config", "progbar", "env"), "w") as f:
+            f.write("PROGD_PUBLIC_URL=http://me:7777\nPROGD_PEERS=http://p1:7777,http://p2:7777\n")
+        r, js = self.gen(home=home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for h in ("http://me:7777", "http://p1:7777", "http://p2:7777"):
+            self.assertIn(f'"{h}"', js)
+
+    def test_rejects_bad_host(self):
+        r, js = self.gen('http://a:7777"];alert(1);//')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIsNone(js)
+
+
 if __name__ == "__main__":
     unittest.main()

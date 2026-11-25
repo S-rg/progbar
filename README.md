@@ -32,7 +32,7 @@ whose shell doesn't show progress bars, and it works just as well for anything y
 On each machine:
 
 ```bash
-git clone https://github.com/<you>/progbar && cd progbar
+git clone https://github.com/S-rg/progbar && cd progbar
 ./install.sh --peers http://other-machine:7777,http://third-machine:7777
 ```
 
@@ -46,6 +46,7 @@ The installer:
 3. writes `~/.config/progbar/env` (listen addresses come from `tailscale ip -4`)
 4. starts a systemd user service / launchd agent
 5. adds a PreToolUse hook to `~/.claude/settings.json` (backed up first)
+6. generates the iPhone widget script with this machine and its peers (see [Viewing](#viewing))
 
 On Linux, run `sudo loginctl enable-linger $USER` so the service keeps running after you log out.
 
@@ -84,10 +85,19 @@ rewritten it. Every wrapped call then has to be sent twice. Only wrapping backgr
 
 - **Webpage (live):** `http://<machine>:7777`. It shows every machine in `PROGD_PEERS`, plus any you add
   in the page's *Devices* box. On a phone, use *Add to Home Screen*.
-- **iPhone widget:** install [Scriptable](https://scriptable.app), paste
-  [`widget/progbar-widget.js`](widget/progbar-widget.js) into a new script, set `HOSTS`, and add a
+- **iPhone widget:** `install.sh` generates `widget/progbar-widget.js` from
+  [`widget/progbar-widget.template.js`](widget/progbar-widget.template.js) with this machine and its
+  peers filled in. To regenerate it, or to use a different host list:
+
+  ```bash
+  widget/generate.sh                                  # hosts from ~/.config/progbar/env
+  widget/generate.sh http://laptop-a:7777 http://laptop-b:7777
+  ```
+
+  Install [Scriptable](https://scriptable.app), paste the generated file into a new script, and add a
   Scriptable widget (small, medium, large, or lock-screen). iOS refreshes widgets only every few minutes,
-  so the widget is for a quick glance; tap it to open the live page.
+  so the widget is for a quick glance; tap it to open the live page. The generated file contains your
+  hostnames and is gitignored.
 - **Push notifications (optional):** set `NTFY_URL` to an [ntfy](https://ntfy.sh) topic to get alerts when
   runs finish, fail or go silent. Self-host ntfy on your tailnet, or use ntfy.sh with a long random
   topic (anyone who knows the topic can read the messages).
